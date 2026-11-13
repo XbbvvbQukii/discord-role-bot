@@ -1,96 +1,122 @@
-import {
-  Client,
-  GatewayIntentBits,
-  Events,
-  REST,
-  Routes,
-  PermissionFlagsBits,
-} from 'discord.js';
-import { config, assertConfig } from './src/config.js';
-import { commands, handleRoleMenu, BUTTON_PREFIX } from './src/commands.js';
+require('dotenv').config();
+const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, EmbedBuilder } = require('discord.js');
 
-assertConfig();
-
-// Guilds is the only gateway intent needed — role assignment uses the REST API,
-// and buttons arrive as interactions. No privileged intents, so nothing extra
-// to toggle in the Developer Portal.
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-client.once(Events.ClientReady, async (c) => {
-  console.log(`[role-bot] online as ${c.user.tag} in ${c.guilds.cache.size} server(s)`);
-  c.user.setActivity(config.activity);
-
-  // Register slash commands globally. New servers see them within an hour;
-  // for instant availability, invite the bot and it registers on startup.
-  try {
-    const rest = new REST().setToken(config.token);
-    await rest.put(Routes.applicationCommands(c.user.id), { body: commands });
-    console.log('[role-bot] slash commands registered');
-  } catch (err) {
-    console.error('[role-bot] failed to register commands:', err.message);
-  }
+// Initialisierung des Discord Clients mit den erforderlichen Intents
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  try {
-    if (interaction.isChatInputCommand() && interaction.commandName === 'rolemenu') {
-      return await handleRoleMenu(interaction);
-    }
+// Bot Präfix
+const PREFIX = '!';
 
-    if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX)) {
-      return await toggleRole(interaction);
-    }
-  } catch (err) {
-    console.error('[role-bot] interaction error:', err);
-    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-      await interaction.reply({ content: '⚠️ Something went wrong. Please try again.', ephemeral: true }).catch(() => {});
-    }
-  }
+client.once('ready', () => {
+    console.log(`Bot eingeloggt als ${client.user.tag}`);
 });
 
-/** A member clicked a role button — add the role if they lack it, else remove it. */
-async function toggleRole(interaction) {
-  const roleId = interaction.customId.slice(BUTTON_PREFIX.length);
-  const role = interaction.guild.roles.cache.get(roleId) ?? (await interaction.guild.roles.fetch(roleId).catch(() => null));
+client.on('messageCreate', async (message) => {
+    // Ignoriere Bots und Nachrichten ohne Präfix
+    if (message.author.bot || !message.content.startsWith(PREFIX)) return;
 
-  if (!role) {
-    return interaction.reply({ content: '⚠️ That role no longer exists.', ephemeral: true });
-  }
+    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
 
-  const me = interaction.guild.members.me;
-  if (!me.permissions.has(PermissionFlagsBits.ManageRoles) || role.comparePositionTo(me.roles.highest) >= 0) {
-    return interaction.reply({
-      content: `⚠️ I can't manage **${role.name}** — check that my role is above it and I have Manage Roles.`,
-      ephemeral: true,
-    });
-  }
+    // Befehl: !ticket - Erstellt einen privaten Support-Kanal
+    if (command === 'ticket') {
+        try {
+            const guild = message.guild;
+            const user = message.author;
 
-  const member = interaction.member;
-  const has = member.roles.cache.has(roleId);
-  if (has) {
-    await member.roles.remove(roleId);
-    return interaction.reply({ content: `➖ Removed ${role}.`, ephemeral: config.ephemeralReplies });
-  }
-  await member.roles.add(roleId);
-  return interaction.reply({ content: `➕ Added ${role}.`, ephemeral: config.ephemeralReplies });
-}
+            // Name des Ticket-Kanals
+            const channelName = `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
 
-client.login(config.token).catch((error) => {
-  if (String(error.code) === 'TokenInvalid' || String(error).includes('TOKEN_INVALID')) {
-    console.error('[role-bot] Discord rejected DISCORD_TOKEN. Reset it at discord.com/developers → your app → Bot → Reset Token, paste the new one under Environment variables in the FadeHost panel, and restart.');
-  } else if (String(error.code) === 'DisallowedIntents' || String(error).includes('disallowed intents')) {
-    console.error('[role-bot] Discord refused the gateway intents this bot needs. Open discord.com/developers → your app → Bot → Privileged Gateway Intents and enable SERVER MEMBERS INTENT and MESSAGE CONTENT INTENT, then restart the bot.');
-  } else {
-    console.error(`[role-bot] Could not log in to Discord: ${error.message}`);
-  }
-  process.exit(1);
+            // Prüfen, ob der Bot die Berechtigung hat, Kanäle zu verwalten
+            if (!guild.members.me.permissions.has(PermissionFlagsBits.ManageChannels)) {
+                return message.reply('Fehler: Mir fehlen Berechtigungen zum Erstellen von Kanälen.');
+            }
+
+            // Erstellen des Textkanals mit spezifischen Berechtigungen
+            const ticketChannel = await guild.channels.create({
+                name: channelName,
+                type: ChannelType.GuildText,
+                permissionOverwrites: [
+                    {
+                        // Verweigere dem @everyone-Role den Zugriff
+                        id: guild.id,
+                        deny: [PermissionFlagsBits.ViewChannel],
+                    },
+                    {
+                        // Erlaube dem Ticket-Ersteller den Zugriff
+                        id: user.id,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel,
+                            PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ReadMessageHistory,
+                            PermissionFlagsBits.AttachFiles
+                        ],
+                    },
+                    {
+                        // Erlaube dem Bot selbst den Zugriff
+                        id: client.user.id,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel,
+                            PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ReadMessageHistory,
+                            PermissionFlagsBits.ManageChannels
+                        ],
+                    }
+                ],
+            });
+
+            const welcomeEmbed = new EmbedBuilder()
+                .setColor(0x00AE86)
+                .setTitle('Support Ticket erstellt')
+                .setDescription(`Hallo ${user}, ein Support-Mitarbeiter wird sich in Kürze um dich kümmern.\nNutze **!close**, um dieses Ticket zu schließen.`)
+                .setTimestamp();
+
+            await ticketChannel.send({ embeds: [welcomeEmbed] });
+            
+            message.reply(`Dein Ticket wurde erstellt: ${ticketChannel}`);
+
+        } catch (error) {
+            console.error('Fehler beim Erstellen des Tickets:', error);
+            message.reply('Es gab einen Fehler beim Erstellen deines Tickets.');
+        }
+    }
+
+    // Befehl: !close - Schließt den aktuellen Ticket-Kanal
+    if (command === 'close') {
+        try {
+            // Sicherstellen, dass der Befehl nur in Ticket-Kanälen ausgeführt wird
+            if (!message.channel.name.startsWith('ticket-')) {
+                return message.reply('Dieser Befehl kann nur innerhalb eines Ticket-Kanals verwendet werden.');
+            }
+
+            await message.channel.send('Dieses Ticket wird in 5 Sekunden geschlossen und gelöscht...');
+
+            // Kurze Verzögerung vor dem Löschen
+            setTimeout(async () => {
+                try {
+                    await message.channel.delete();
+                } catch (err) {
+                    console.error('Fehler beim Löschen des Kanals:', err);
+                }
+            }, 5000);
+
+        } catch (error) {
+            console.error('Fehler beim Schließen des Tickets:', error);
+            message.reply('Fehler: Der Kanal konnte nicht geschlossen werden.');
+        }
+    }
 });
 
-// The FadeHost runtime sends SIGTERM on stop/restart — exit cleanly.
-for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.on(signal, () => {
-    console.log(`[role-bot] ${signal} received, shutting down`);
-    client.destroy();
-    process.exit(0);
-  });
-}
+// Error Handling für unvorhergesehene Abstürze
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unbehandelte Ablehnung bei:', promise, 'Grund:', reason);
+});
+
+// Bot Login
+client.login(process.env.DISCORD_TOKEN);
